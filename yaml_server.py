@@ -4,6 +4,7 @@ import socket
 import os
 import yaml
 import logging
+import multiprocessing
 
 STATUS_OK = "100 Ok\n"
 STATUS_NO_SUCH_KEY = "200 No such key\n\n"
@@ -28,23 +29,23 @@ def valid_GET_headers(req):
     headers=list(req.keys())
     if len(headers) != 2:
         return False
-    elif 'Key' not in headers[0] or 'Field' not in headers[1]:
+    elif headers[0] != 'Key' or headers[1] != 'Field':
         return False
-    elif ' ' in headers or (':' or '/') in headers[0]:
-        return False
-    else:
-        return True
-    
-def valid_FIELDS_headers(req):
-    header = list(req.keys())
-    if len(header) != 1:
-        return False
-    elif 'Key' not in header or ('/' or ' ' or ':') in header:
+    elif ' ' in req['Field'] or ' ' in req['Key'] or ':' in req['Key'] or '/' in req['Key']:
         return False
     else:
         return True
 
-    
+def valid_FIELDS_headers(req):
+    header = list(req.keys())
+    if len(header) != 1:
+        return False
+    elif 'Key' not in header or '/' in req or ' ' in req or ':' in req:
+        return False
+    else:
+        return True
+
+
 class Request:
 
     def __init__(self, f):
@@ -53,12 +54,12 @@ class Request:
         while True:
             line = f.readline()
             line = line.decode('utf-8')
-            line_strip = line.rstrip()    
+            line_strip = line.rstrip()
             logging.debug(f'Recieved {line_strip}')
             lines.append(line_strip)
             if line_strip == '':
                 if not line:
-                    logging.error('Client disconnected')
+                    logging.debug('Client disconnected')
                     raise ConnectionClosed
                 else:
                     break
@@ -66,7 +67,7 @@ class Request:
             if ':' in line:
                 if len(line.split(':')) > 2:
                     raise BadRequest
-        
+
         self.method = lines[0]
         self.content = dict(line.split(':') for line in lines[1:] if ':' in line)
 
@@ -143,32 +144,40 @@ METHODS={
     'FIELDS':method_FIELDS,
 }
 
+def handle_client(client_socket, address):
+    logging.info(f"Connection established from {address}")
+    f = client_socket.makefile('rwb')
+
+    while True:
+        try:
+            req=Request(f)
+        except ConnectionClosed:
+            logging.info(f'connection closed {address}')
+            break
+        except BadRequest:
+            Response(STATUS_BAD_REQUEST).send(f)
+            continue
+        if req.method in METHODS:
+            response=METHODS[req.method](req)
+        else:
+            response=Response(STATUS_UNKNOWN_METHOD)
+
+        response.send(f)
+
 def start_server(host='localhost', port = 9999):
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    server.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR,1)
     server.bind((host, port))
     server.listen()
     logging.info(f"Server set up on {host}:{port}")
 
     while True:
         connection, address = server.accept()
-        logging.info(f"Connection established from {address}")
-        while True:
-            f = connection.makefile('rwb')
-            try:
-                req=Request(f)
-            except ConnectionClosed:
-                logging.info(f'connection closed {address}')
-                break;
-            except BadRequest:
-                Response(STATUS_BAD_REQUEST).send(f)
-                continue;
-            if req.method in METHODS:
-                response=METHODS[req.method](req)
-            else:
-                response=Response(STATUS_UNKNOWN_METHOD)
-            response.send(f)
-
+        process=multiprocessing.Process(target=handle_client,args=(connection,address))
+        process.daemon=True
+        process.start()
         connection.close()
+
 
 if __name__ == '__main__':
     start_server()
