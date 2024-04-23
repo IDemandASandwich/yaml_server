@@ -6,16 +6,15 @@ import yaml
 import logging
 import multiprocessing
 
-STATUS_OK = "100 Ok\n"
-STATUS_NO_SUCH_KEY = "200 No such key\n\n"
-STATUS_READ_ERROR = "201 Read error\n\n"
-STATUS_FILE_FORMAT_ERROR = "202 File format error\n\n"
-STATUS_UNKNOWN_METHOD = "203 Unknown method\n\n"
-STATUS_NO_SUCH_FIELD = "204 No such field\n\n"
-STATUS_BAD_REQUEST = "300 Bad request\n\n"
+STATUS_OK = (100,"Ok")
+STATUS_NO_SUCH_KEY = (200, "No such key")
+STATUS_READ_ERROR = (201,"Read error")
+STATUS_FILE_FORMAT_ERROR = (202,"File format error")
+STATUS_UNKNOWN_METHOD = (203,"Unknown method")
+STATUS_NO_SUCH_FIELD = (204,"No such field")
+STATUS_BAD_REQUEST = (300,"Bad request")
 
 #logging.basicConfig(level=logging.DEBUG)
-
 
 class ConnectionClosed(Exception):
 
@@ -44,7 +43,6 @@ def valid_FIELDS_headers(req):
         return False
     else:
         return True
-
 
 class Request:
 
@@ -81,9 +79,10 @@ class Response:
 
     def send(self, f):
 
-        f.write(f'{self.status}'.encode('utf-8'))
+        f.write(f'{self.status[0]} {self.status[1]}\n'.encode('utf-8'))
         for key,item in self.headers.items():
             f.write(f'{key}:{item}'.encode('utf-8'))
+        f.write('\n'.encode('utf-8'))
         if self.content:
             f.write(self.content.encode('utf-8'))
         f.flush()
@@ -98,7 +97,7 @@ def method_GET(req):
         with open(os.path.join('data/', f"{filename}.yaml"), 'r') as file:
             content = yaml.safe_load(file)
         response=yaml.dump(content[field])
-        header={'Content-length':f'{len(response.encode("utf-8"))}\n\n'}
+        header={'Content-length':f'{len(response.encode("utf-8"))}\n'}
         return Response(STATUS_OK, header, response)
     except FileNotFoundError:
         return Response(STATUS_NO_SUCH_KEY)
@@ -116,7 +115,7 @@ def method_KEYS(req):
     files=os.listdir(dir)
     files=[file.replace('.yaml','') for file in files if file.endswith('.yaml')]
     keys = yaml.dump(files)
-    header = {'Content-length':f'{len(keys.encode("utf-8"))}\n\n'}
+    header = {'Content-length':f'{len(keys.encode("utf-8"))}\n'}
     return Response(STATUS_OK, header, keys)
 
 def method_FIELDS(req):
@@ -128,7 +127,7 @@ def method_FIELDS(req):
         with open(os.path.join('data/',f"{filename}.yaml"), 'r') as file:
             content=yaml.safe_load(file)
         fields=yaml.dump(list(content.keys()))
-        header={'Content-length':f'{len(fields.encode("utf-8"))}\n\n'}
+        header={'Content-length':f'{len(fields.encode("utf-8"))}\n'}
         return Response(STATUS_OK, header, fields)
     except FileNotFoundError:
         return Response(STATUS_NO_SUCH_KEY)
