@@ -28,6 +28,33 @@ class connectionClosed(Exception):
 
     pass
 
+class YamlObject(dict):
+
+    def load(self, key, lock):
+
+        try:
+            with lock:
+                with open(os.path.join('data/', f"{key}.yaml"), 'r') as file:
+                    content = yaml.safe_load(file)
+                self.update(content)
+        except FileNotFoundError:
+            raise ErrorResponse(Response(STATUS_NO_SUCH_KEY))
+        except OSError:
+            raise ErrorResponse(Response(STATUS_READ_ERROR))
+        except yaml.YAMLError:
+            raise ErrorResponse(Response(STATUS_FILE_FORMAT_ERROR))
+        except (KeyError,TypeError):
+            raise ErrorResponse(Response(STATUS_NO_SUCH_FIELD))
+
+    def save(self, key, lock):
+        
+        with lock:
+            try:
+                with open(os.path.join('data/', f"{key}.yaml"), 'w') as file:
+                    yaml.dump(dict(self), file)
+            except IOError:
+                raise ErrorResponse(Response(STATUS_WRITE_ERROR))
+
 def valid_GET_headers(req):
     headers=list(req.keys())
     if len(headers) != 2:
@@ -118,23 +145,17 @@ def method_GET(req, lock):
     if not valid_GET_headers(req.headers):
         raise ErrorResponse(Response(STATUS_BAD_REQUEST))
 
-    filename=req.headers.get("Key")
-    field=req.headers.get("Field")
     try:
-        with lock:
-            with open(os.path.join('data/', f"{filename}.yaml"), 'r') as file:
-                content = yaml.safe_load(file)
-            response=yaml.dump(content[field])
-            header={'Content-length':f'{len(response.encode("utf-8"))}\n'}
+        filename=req.headers.get("Key")
+        field=req.headers.get("Field")
+        obj=YamlObject()
+        obj.load(filename, lock)
+        
+        response=yaml.dump(obj[field])
+        header={'Content-length':f'{len(response.encode("utf-8"))}\n'}
         return Response(STATUS_OK, header, response)
-    except FileNotFoundError:
-        raise ErrorResponse(Response(STATUS_NO_SUCH_KEY))
-    except OSError:
-        raise ErrorResponse(Response(STATUS_READ_ERROR))
-    except yaml.YAMLError:
-        raise ErrorResponse(Response(STATUS_FILE_FORMAT_ERROR))
     except (KeyError,TypeError):
-        raise ErrorResponse(Response(STATUS_NO_SUCH_FIELD))
+            raise ErrorResponse(Response(STATUS_NO_SUCH_FIELD))
 
 def method_KEYS(req, lock):
     dir = 'data/'
@@ -151,20 +172,14 @@ def method_FIELDS(req, lock):
         raise ErrorResponse(Response(STATUS_BAD_REQUEST))
     filename=req.headers.get('Key')
     logging.info(filename)
-    try:
-        with lock:
-            with open(os.path.join('data/',f"{filename}.yaml"), 'r') as file:
-                content=yaml.safe_load(file)
-            fields=yaml.dump(list(content.keys()))
-            header={'Content-length':f'{len(fields.encode("utf-8"))}\n'}
-        return Response(STATUS_OK, header, fields)
-    except FileNotFoundError:
-        raise ErrorResponse(Response(STATUS_NO_SUCH_KEY))
-    except OSError:
-        raise ErrorResponse(Response(STATUS_READ_ERROR))
-    except yaml.error.YAMLError:
-        raise ErrorResponse(Response(STATUS_FILE_FORMAT_ERROR))
     
+    obj = YamlObject()
+    obj.load(filename, lock)
+
+    fields=yaml.dump(list(obj.keys()))
+    header={'Content-length':f'{len(fields.encode("utf-8"))}\n'}
+    return Response(STATUS_OK, header, fields)
+
 def method_PUT(req, lock):
     if not valid_PUT_headers(req.headers):
         raise ErrorResponse(Response(STATUS_BAD_REQUEST))
@@ -172,29 +187,14 @@ def method_PUT(req, lock):
     field=req.headers.get('Field')
     new=req.content
     
-    with lock:
-        try:
-            with open(os.path.join('data/', f"{filename}.yaml"), 'r') as file:
-                content = yaml.safe_load(file)
-            content[field] = new
+    obj = YamlObject()
+    obj.load(filename,lock)
 
-            out = yaml.dump(content)
-            try:
-                with open(os.path.join('data/', f"{filename}.yaml"), 'w') as file:
-                    file.write(out)
-            except IOError:
-                raise ErrorResponse(Response(STATUS_WRITE_ERROR))
+    obj[field] = new
+    obj.save(filename,lock)
 
-        except FileNotFoundError:
-            raise ErrorResponse(Response(STATUS_NO_SUCH_KEY))
-        except OSError:
-            raise ErrorResponse(Response(STATUS_READ_ERROR))    
-        except yaml.error.YAMLError:
-            raise ErrorResponse(Response(STATUS_FILE_FORMAT_ERROR))
-        except (KeyError, TypeError):
-            raise ErrorResponse(Response(STATUS_NO_SUCH_FIELD))
     return Response(STATUS_OK)
-    
+
 
 METHODS={
     'GET':method_GET,
