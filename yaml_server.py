@@ -12,15 +12,19 @@ STATUS_READ_ERROR = (201,"Read error")
 STATUS_FILE_FORMAT_ERROR = (202,"File format error")
 STATUS_UNKNOWN_METHOD = (203,"Unknown method")
 STATUS_NO_SUCH_FIELD = (204,"No such field")
+STATUS_WRITE_ERROR = (205, 'Write error')
+STATUS_YAML_ERROR = (206, 'YAML error')
 STATUS_BAD_REQUEST = (300,"Bad request")
 
-#logging.basicConfig(level=logging.DEBUG)
+logging.basicConfig(level=logging.DEBUG)
 
-class ConnectionClosed(Exception):
+class ErrorResponse(Exception):
 
-    pass
+    def __init__(self, response):
 
-class BadRequest(Exception):
+        self.response = response
+
+class connectionClosed(Exception):
 
     pass
 
@@ -44,6 +48,17 @@ def valid_FIELDS_headers(req):
     else:
         return True
 
+def valid_PUT_headers(req):
+    headers = list(req.keys())
+    if len(headers) != 3:
+        return False
+    elif headers[0] != 'Key' or headers[1] != 'Field' or headers[2] != 'Content-length':
+        return False
+    elif ' ' in req['Field'] or ' ' in req['Key'] or ':' in req['Key'] or '/' in req['Key']:
+        return False
+    else:
+        return True
+
 class Request:
 
     def __init__(self, f):
@@ -51,23 +66,35 @@ class Request:
         lines = []
         while True:
             line = f.readline()
+            logging.debug(f'Recieved {line}')
             line = line.decode('utf-8')
             line_strip = line.rstrip()
-            logging.debug(f'Recieved {line_strip}')
             lines.append(line_strip)
             if line_strip == '':
                 if not line:
-                    logging.debug('Client disconnected')
-                    raise ConnectionClosed
+                    raise connectionClosed
                 else:
                     break
+
+        if lines[0] not in METHODS:
+            raise ErrorResponse(Response(STATUS_UNKNOWN_METHOD))
+        
         for line in lines[1:]:
             if ':' in line:
                 if len(line.split(':')) > 2:
-                    raise BadRequest
+                    raise ErrorResponse(Response(STATUS_BAD_REQUEST))
 
         self.method = lines[0]
-        self.content = dict(line.split(':') for line in lines[1:] if ':' in line)
+        self.headers = dict(line.split(':') for line in lines[1:] if ':' in line)
+
+        if self.method == 'PUT':
+            try:
+                content_length = int(self.headers.get('Content-length', 0))
+                line_content = yaml.safe_load(f.read(content_length).decode('utf-8'))
+                logging.debug(f'recieved:{line_content}')
+                self.content = line_content
+            except yaml.error.YAMLError:
+                raise ErrorResponse(Response(STATUS_YAML_ERROR))
 
 class Response:
 
@@ -87,81 +114,109 @@ class Response:
             f.write(self.content.encode('utf-8'))
         f.flush()
 
-def method_GET(req):
-    if not valid_GET_headers(req.content):
-        return Response(STATUS_BAD_REQUEST)
+def method_GET(req, lock):
+    if not valid_GET_headers(req.headers):
+        raise ErrorResponse(Response(STATUS_BAD_REQUEST))
 
-    filename=req.content.get("Key")
-    field=req.content.get("Field")
+    filename=req.headers.get("Key")
+    field=req.headers.get("Field")
     try:
-        with open(os.path.join('data/', f"{filename}.yaml"), 'r') as file:
-            content = yaml.safe_load(file)
-        response=yaml.dump(content[field])
-        header={'Content-length':f'{len(response.encode("utf-8"))}\n'}
+        with lock:
+            with open(os.path.join('data/', f"{filename}.yaml"), 'r') as file:
+                content = yaml.safe_load(file)
+            response=yaml.dump(content[field])
+            header={'Content-length':f'{len(response.encode("utf-8"))}\n'}
         return Response(STATUS_OK, header, response)
     except FileNotFoundError:
-        return Response(STATUS_NO_SUCH_KEY)
+        raise ErrorResponse(Response(STATUS_NO_SUCH_KEY))
     except OSError:
-        return Response(STATUS_READ_ERROR)
+        raise ErrorResponse(Response(STATUS_READ_ERROR))
     except yaml.YAMLError:
-        return Response(STATUS_FILE_FORMAT_ERROR)
-    except KeyError or TypeError:
-        return Response(STATUS_NO_SUCH_FIELD)
+        raise ErrorResponse(Response(STATUS_FILE_FORMAT_ERROR))
+    except (KeyError,TypeError):
+        raise ErrorResponse(Response(STATUS_NO_SUCH_FIELD))
 
-def method_KEYS(req):
+def method_KEYS(req, lock):
     dir = 'data/'
     if not os.path.isdir(dir):
-        return Response(STATUS_READ_ERROR)
+        raise ErrorResponse(Response(STATUS_READ_ERROR))
     files=os.listdir(dir)
     files=[file.replace('.yaml','') for file in files if file.endswith('.yaml')]
     keys = yaml.dump(files)
     header = {'Content-length':f'{len(keys.encode("utf-8"))}\n'}
     return Response(STATUS_OK, header, keys)
 
-def method_FIELDS(req):
-    if not valid_FIELDS_headers(req.content):
-        return Response(STATUS_BAD_REQUEST)
-    filename=req.content.get('Key')
+def method_FIELDS(req, lock):
+    if not valid_FIELDS_headers(req.headers):
+        raise ErrorResponse(Response(STATUS_BAD_REQUEST))
+    filename=req.headers.get('Key')
     logging.info(filename)
     try:
-        with open(os.path.join('data/',f"{filename}.yaml"), 'r') as file:
-            content=yaml.safe_load(file)
-        fields=yaml.dump(list(content.keys()))
-        header={'Content-length':f'{len(fields.encode("utf-8"))}\n'}
+        with lock:
+            with open(os.path.join('data/',f"{filename}.yaml"), 'r') as file:
+                content=yaml.safe_load(file)
+            fields=yaml.dump(list(content.keys()))
+            header={'Content-length':f'{len(fields.encode("utf-8"))}\n'}
         return Response(STATUS_OK, header, fields)
     except FileNotFoundError:
-        return Response(STATUS_NO_SUCH_KEY)
+        raise ErrorResponse(Response(STATUS_NO_SUCH_KEY))
     except OSError:
-        return Response(STATUS_READ_ERROR)
+        raise ErrorResponse(Response(STATUS_READ_ERROR))
     except yaml.error.YAMLError:
-        return Response(STATUS_FILE_FORMAT_ERROR)
+        raise ErrorResponse(Response(STATUS_FILE_FORMAT_ERROR))
+    
+def method_PUT(req, lock):
+    if not valid_PUT_headers(req.headers):
+        raise ErrorResponse(Response(STATUS_BAD_REQUEST))
+    filename=req.headers.get('Key')
+    field=req.headers.get('Field')
+    new=req.content
+    
+    with lock:
+        try:
+            with open(os.path.join('data/', f"{filename}.yaml"), 'r') as file:
+                content = yaml.safe_load(file)
+            content[field] = new
 
+            out = yaml.dump(content)
+            try:
+                with open(os.path.join('data/', f"{filename}.yaml"), 'w') as file:
+                    file.write(out)
+            except IOError:
+                raise ErrorResponse(Response(STATUS_WRITE_ERROR))
+
+        except FileNotFoundError:
+            raise ErrorResponse(Response(STATUS_NO_SUCH_KEY))
+        except OSError:
+            raise ErrorResponse(Response(STATUS_READ_ERROR))    
+        except yaml.error.YAMLError:
+            raise ErrorResponse(Response(STATUS_FILE_FORMAT_ERROR))
+        except (KeyError, TypeError):
+            raise ErrorResponse(Response(STATUS_NO_SUCH_FIELD))
+    return Response(STATUS_OK)
+    
 
 METHODS={
     'GET':method_GET,
     'KEYS':method_KEYS,
     'FIELDS':method_FIELDS,
+    'PUT':method_PUT,
 }
 
-def handle_client(client_socket, address):
+def handle_client(client_socket, address, lock):
     logging.info(f"Connection established from {address}")
     f = client_socket.makefile('rwb')
 
     while True:
         try:
             req=Request(f)
-        except ConnectionClosed:
-            logging.info(f'connection closed {address}')
+            METHODS[req.method](req, lock).send(f)
+        except ErrorResponse as exc:
+            exc.response.send(f)
+        except connectionClosed:
+            logging.info(f'Connection closed: {address}')
             break
-        except BadRequest:
-            Response(STATUS_BAD_REQUEST).send(f)
-            continue
-        if req.method in METHODS:
-            response=METHODS[req.method](req)
-        else:
-            response=Response(STATUS_UNKNOWN_METHOD)
-
-        response.send(f)
+        f.flush()
 
 def start_server(host='localhost', port = 9999):
     server = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
@@ -169,10 +224,11 @@ def start_server(host='localhost', port = 9999):
     server.bind((host, port))
     server.listen()
     logging.info(f"Server set up on {host}:{port}")
+    lock = multiprocessing.Lock()
 
     while True:
         connection, address = server.accept()
-        process=multiprocessing.Process(target=handle_client,args=(connection,address))
+        process=multiprocessing.Process(target=handle_client,args=(connection,address,lock))
         process.daemon=True
         process.start()
         connection.close()
