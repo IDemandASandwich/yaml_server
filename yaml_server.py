@@ -14,6 +14,7 @@ STATUS_UNKNOWN_METHOD = (203,"Unknown method")
 STATUS_NO_SUCH_FIELD = (204,"No such field")
 STATUS_WRITE_ERROR = (205, 'Write error')
 STATUS_YAML_ERROR = (206, 'YAML error')
+STATUS_NOT_A_MAPPING = (207, 'Not a mapping')
 STATUS_BAD_REQUEST = (300,"Bad request")
 
 logging.basicConfig(level=logging.DEBUG)
@@ -45,6 +46,16 @@ class YamlObject(dict):
             raise ErrorResponse(Response(STATUS_FILE_FORMAT_ERROR))
         except (KeyError,TypeError):
             raise ErrorResponse(Response(STATUS_NO_SUCH_FIELD))
+        
+    def fromDict(self, data):
+        if type(data) != dict:
+            raise ErrorResponse(Response(STATUS_NOT_A_MAPPING))
+
+        try:
+            self.update(data)
+        except yaml.error.YAMLError:
+            raise ErrorResponse(Response(STATUS_YAML_ERROR))
+
 
     def save(self, key, lock):
         
@@ -85,6 +96,17 @@ def valid_PUT_headers(req):
         return False
     else:
         return True
+    
+def valid_POST_headers(req):
+    headers = list(req.keys())
+    if len(headers) != 2:
+        return False
+    elif headers[0] != 'Key' or headers[1] != 'Content-length':
+        return False
+    elif ' ' in req['Key'] or ':' in req['Key'] or '/' in req['Key']:
+        return False
+    else:
+        return True
 
 class Request:
 
@@ -122,7 +144,21 @@ class Request:
                 self.content = line_content
             except yaml.error.YAMLError:
                 raise ErrorResponse(Response(STATUS_YAML_ERROR))
-
+        elif self.method == 'POST':
+            try:
+                content_length = int(self.headers.get('Content-length', 0))
+                content = ''
+                while len(content) < content_length:
+                    line = f.readline().decode('utf-8')
+                    content += line
+                    if len(content) > content_length:
+                        content = content[:content_length]
+                dict_content = yaml.safe_load(content)
+                logging.debug(f'recieved:{dict_content}')
+                self.content = dict_content
+            except yaml.error.YAMLError:
+                raise ErrorResponse(Response(STATUS_YAML_ERROR))
+  
 class Response:
 
     def __init__(self, status, headers = {}, content = ""):
@@ -171,7 +207,6 @@ def method_FIELDS(req, lock):
     if not valid_FIELDS_headers(req.headers):
         raise ErrorResponse(Response(STATUS_BAD_REQUEST))
     filename=req.headers.get('Key')
-    logging.info(filename)
     
     obj = YamlObject()
     obj.load(filename, lock)
@@ -195,12 +230,25 @@ def method_PUT(req, lock):
 
     return Response(STATUS_OK)
 
+def method_POST(req, lock):
+    if not valid_POST_headers(req.headers):
+        raise ErrorResponse(Response(STATUS_BAD_REQUEST))
+    filename=req.headers.get('Key')
+    content=req.content
+
+    obj = YamlObject()
+    obj.fromDict(content)
+    obj.save(filename, lock)
+
+    return Response(STATUS_OK)
+
 
 METHODS={
     'GET':method_GET,
     'KEYS':method_KEYS,
     'FIELDS':method_FIELDS,
     'PUT':method_PUT,
+    'POST':method_POST,
 }
 
 def handle_client(client_socket, address, lock):
